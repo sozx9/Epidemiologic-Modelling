@@ -27,10 +27,10 @@ The project aims to answer the following questions:
 * Coverage: Proportion of actual values that fall within the prediction interval.
 * Root mean squared error.
 
-### 5. Dataset
+### 4. Dataset
 Ministry of Health. (2023). Number of COVID-19 infections by Epi-week (2024) [Dataset]. data.gov.sg. Retrieved October 31, 2025 from https://data.gov.sg/datasets/d_11e68bba3b3c76733475a72d09759eeb/view
 
-### 6. Future Extensions
+### 5. Future Extensions
 Future work includes:
 * Implementing a machine learning model, and comparing the short-term forecasting performances for both the SIR model and the machine learning model.
 * Incorporating spatial or mobility data for more realistic modelling of transmission of COVID-19.

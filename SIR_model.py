@@ -3,110 +3,111 @@ import pandas as pd
 from scipy.integrate import odeint
 from scipy.optimize import least_squares
 
-def sir_model(y0, t, beta, gamma):
+def run_sir_model(S0, I0, R0, num_weeks, transmission_rate, recovery_rate):
     #S, I, R represents proportion of population that is susceptible, infected, and recovered respectively
     #S0, I0, R0 represent the initial proportions
     #rate of change of S, I, R can be found using known formulas
     #integrate the derivatives to get S, I, R across some time interval t (measured in terms of weeks)
     #output: values of S, I, R across time interval t
 
-    def derivative(y, t, beta, gamma):
-        S, I, R = y
-        dSdt = -beta * S * I
-        dIdt = beta * S * I - gamma * I
-        dRdt = gamma * I
+    def get_derivative(S, I, R, transmission_rate, recovery_rate):
+        #transmission rate = rate of transmission between S and I populations
+        #recovery rate = rate of recovery in I populations
+        
+        dSdt = -transmission_rate * S * I
+        dIdt = transmission_rate * S * I - recovery_rate * I
+        dRdt = recovery_rate * I
         return dSdt, dIdt, dRdt
-    
-    sol = odeint(derivative, y0, t, args=(beta, gamma))
-    return sol.T  # returns S, I, R
+
+    weeks = np.arange(num_weeks)
+    sol = odeint(get_derivative, [S0, I0, R0], weeks, args=(transmission_rate, recovery_rate))    
+    return sol.T #returns S, I, R
 
 
-def fit_sir_model(observed_cases, S0, I0, R0):
-    #parameters: beta - represents transmission rate (between infected and susceptible individuals)
-                #gamma - represents recovery rate
-                #rho - represents reporting probability,
-                      #used to map no. of true infections --> no. of reported infection cases
-    
-    #function estimates the above parameters using least squared error 
-    #between observed counts (actual data) and SIR model counts, since the true parameters are unknown
-    
-    T = len(observed_cases)
-
-    def residuals(params):
-        beta, gamma, rho = params
-        sol = sir_model(beta, gamma, S0, I0, R0, T)
-        pred = simulate_observations(sol, rho)
-        return pred - observed_cases
-    
-    init_guess = [0.5, 0.2, 0.8]
-    bounds = ([0.01, 0.01, 0.1], [1, 1, 1])
-    res = least_squares(residuals, init_guess, bounds=bounds)
-    return res.x    
-
-
-def simulate_observations(S, I, R, rho, N):
+def simulate_data(sol, reporting_rate):
     #function generates synthetic data (i.e. no. of "observed" infection cases) for bootstrap forecasting later
     #we model the observed / reported number of cases as Poisson random variables,
     #with mean proportional to the no. of true new infections predicted by the SIR model
 
-    dR = np.diff(R) 
-    mean_cases = np.maximum(rho * dR * N, 1e-8)
-    observed = np.random.poisson(mean_cases)
-    return observed
+    S, I, R = sol[:,0], sol[:,1], sol[:,2]
+    mean = np.maximum(reporting_rate * I, 10**(-8))
+    reported_cases = np.random.poisson(mean)
+    return reported_cases
 
 
-def forecast(theta, N, training_cases, num_weeks_ahead):
-    #parameter theta = (beta, gamma, rho), which are already fitted to the SIR model using least squares
-    #function forecasts no. of cases num_weeks_ahead
+def fit_sir_params(data, S0, I0, R0):
+    #function estimates parameters: transmission_rate, recovery_rate, reporting_rate 
+    #using least squared error between I(t) and predicted I(t) from model
 
-    beta, gamma, rho = theta
-    T = len(training_cases)
-
-    #recreate entire trajectory up to T
-    I0_guess = 0.001
-    y0 = (1 - I0_guess, I0_guess, 0)
-    S, I, R = sir_model(y0, np.arange(T+1), beta, gamma)
-
-    #starting from last state
-    y0_future = (S[-1], I[-1], R[-1])
-    t_future = np.arange(num_weeks_ahead+1)
-
-    S_fut, I_fut, R_fut = sir_model(y0_future, t_future, beta, gamma)
-    future_obs = simulate_observations(S_fut, I_fut, R_fut, rho, N)
-    return future_obs
-
-
-def bootstrap_forecast(observed_train, N, num_weeks_ahead=4, num_samples=200):
-    #function quantifies uncertainty (from parameter estimation and observation noise),
-    #for a single forecast period, using parametric bootstraping by:
-        #1. fitting the observed data once to obtain beta, gamma
-        #2. for each bootstramp sample
-            #a. generate synthetic data using obtained beta, gamma
-            #b. re-fit parameters beta, gamma to synthetic data using least squares
-            #c. perform forecasting
+    I_actual = data
+    num_weeks = len(data)
     
-    #output: dict containing forecasts and prediction intervals for each forecast
+    def get_I_diff(params):
+        #function to be used in least squares
+        transmission_rate, recovery_rate, reporting_rate = params
+        sol = run_sir_model(S0, I0, R0, num_weeks, transmission_rate, recovery_rate)
+        I_predicted = simulate_data(sol, reporting_rate)
+        return I_predicted - I_actual
 
-    theta_hat = fit_sir_model(observed_train, N)
+    initial_guess = [0.5, 0.3, 0.8]
+    bounds = ([0.01, 0.01, 0.1], [1, 1, 1])
+    sol = least_squares(get_I_diff, initial_guess, bounds=bounds)
+    return sol.x    
+
+
+def run_forecast(params, last_training_state, num_weeks_ahead):
+    #function predicts no. of infecton cases num_weeks_ahead, starting from some time
+    #used to perform forecasting for a single bootstrap sample later
+    
+    transmission_rate, recovery_rate, reporting_rate = params
+    S0, I0, R0 = last_training_state
+    sol = run_sir_model(S0, I0, R0, num_weeks_ahead, transmission_rate, recovery_rate)    
+    I = sol[:,1]
+    forecast = rho * I
+    return forecast 
+
+
+def run_bootstrap(data, S0, I0, R0, num_weeks_ahead, num_samples):
+    #runs parametric bootstrap, to see how the parameters vary, and how this affects the forecasted no. of infected cases
+    #returns values of forecasted no. of cases needed to construct 95% prediction intervals
+    
+    fitted_params = fit_sir_params(data, S0, I0, R0)
     forecasts = []
+    
+    for _ in range(num_samples):
+        #generate data from fitted model
+        sol = run_sir_model(S0, I0, R0, len(data), fitted_params[0], fitted_params[1])
+        generated_data = simulate_data(sol, fitted_params[2])
 
-    for sample in range(num_samples):
-        #simulate synthetic dataset under fitted theta_hat
-        beta, gamma, rho = theta_hat
-        I0_guess = 0.001
-        y0 = (1 - I0_guess, I0_guess, 0)
-        S, I, R = sir_model(y0, np.arange(len(observed_train)+1), beta, gamma)
-        synthetic_obs = simulate_observations(S, I, R, rho, N)
+        #refit parameters to generated data
+        refitted_params = fit_sir_params(generated_data, S0, I0, R0)
 
-        #re-fit to synthetic data
-        theta = fit_sir_model(synthetic_obs, N)
-
-        #forecast n_weeks_ahead with theta_b
-        future = forecast_sir(theta, N, observed_train, num_weeks_ahead)
-        forecasts.append(future)
-
-    forecasts = np.array(forecasts)  # (B, horizon)
+        #forecast with re-fitted parameters
+        forecast = run_forecast(refitted_params, sol[-1], num_weeks_ahead)
+        forecasts.append(forecast)
+        
+    forecasts = np.array(forecasts)
     median = np.median(forecasts, axis=0)
     lower = np.percentile(forecasts, 2.5, axis=0)
     upper = np.percentile(forecasts, 97.5, axis=0)
-    return {"forecasts": forecasts, "median": median, "lower": lower, "upper": upper}
+    return median, lower, upper
+
+
+def rolling_origin_validation(data, window_size=30, forecast_horizon=4, num_bootstrap_samples=200):
+    forecasts_stats = []
+
+    for start in range(len(data) - window_size - forecast_horizon):
+        training_data = data[start : start + window_size]
+        testing_data = data[start + window_size : start + window_size + forecast_horizon]
+        S0, I0, R0 = 0.99, 0.01, 0.0 
+
+        mean, lower, upper = run_bootstrap(training_data, S0, I0, R0, forecast_horizon, num_bootstrap_samples)
+        forecasts_stats.append({
+            "test_start": start + window_size,
+            "test_end": start + window_size + forecast_horizon,
+            "median": median,
+            "lower": lower,
+            "upper": upper
+        })
+        
+    return forecasts_stats
